@@ -1,25 +1,13 @@
-/* lang: pt-BR
-Se esse pacote ficar bom provavelmente exportarei para seu proprio modulo externo
-
-Estou fazendo merda, mas espero implementar varias chamadas para o syscall,
-e terei que ver oque fazer com FDs abertos pelo syscalls, mas espero implementar logo.
-
-Espero logo implementar o mecanismo do syscall para esse modulo, odeio ficar dependedo do programas externos.
-
-qualquer coisa foi usar o cgo para incorporar o proot no Golang, mas quero algo totalmento feito no Golang
-*/
-
-// Implements Proot in Golang
 package proot
 
 import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"syscall"
 
 	"sirherobrine23.com.br/go-bds/go-proot/filesystem"
-	"sirherobrine23.com.br/go-bds/go-proot/kernel/tracee"
 )
 
 // chroot, mount --bind, and binfmt_misc without privilege/setup for Linux/Android directly from golang
@@ -45,7 +33,7 @@ type PRoot struct {
 	// emulated by QEMU user-mode.  The native execution of host programs
 	// is still effective and the whole host rootfs is bound to
 	// /host-rootfs in the guest environment.
-	Qemu string
+	Qemu []Binfmt
 
 	// Make current kernel appear as kernel release.
 	//
@@ -127,11 +115,13 @@ type PRoot struct {
 	// be compared with ==, at most one goroutine at a time will call Write.
 	Stdout, Stderr io.Writer
 
-	// Process
-	Process *os.Process
+	// Add exec cmd to process proot
+	Cmd *exec.Cmd
 
-	sysTracee *tracee.Tracee
-	vpids     int
+	done   <-chan error
+	newPID int
+
+	vpids int
 }
 
 func closePipes(Stdout, Stderr, Stdin io.Closer) {
@@ -161,30 +151,63 @@ func (proot *PRoot) AttachPipe() (Stdout, Stderr io.ReadCloser, Stdin io.WriteCl
 	return
 }
 
-func readToOs(input io.Reader) (*os.File, error) {
-	if input == nil {
-		return nil, fs.ErrNotExist
-	} else if v, ok := input.(*os.File); ok {
-		return v, nil
+// Start process and watch syscall
+func (proot *PRoot) Start() error {
+	if proot.Cmd != nil {
+		return nil
 	}
-	r, w, err := os.Pipe()
-	if err != nil {
-		return nil, err
+
+	if len(proot.Qemu) > 0 {
+		if len(proot.Binds) == 0 {
+			proot.Binds = map[string]filesystem.Binding{}
+		}
+		proot.Binds["/host-rootfs"] = &filesystem.HostBind{Path: "/", IsFile: false}
 	}
-	go io.Copy(w, input)
-	return r, nil
+
+	readToOs := func(input io.Reader) (*os.File, error) {
+		if input == nil {
+			return nil, fs.ErrNotExist
+		} else if v, ok := input.(*os.File); ok {
+			return v, nil
+		}
+		r, w, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		go io.Copy(w, input)
+		return r, nil
+	}
+
+	writeToOs := func(input io.Writer) (*os.File, error) {
+		if input == nil {
+			return nil, fs.ErrNotExist
+		} else if v, ok := input.(*os.File); ok {
+			return v, nil
+		}
+		r, w, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		go io.Copy(input, r)
+		return w, nil
+	}
+
+	err := error(nil)
+	if proot.Stdout, err = writeToOs(proot.Stdout); err != nil {
+		return err
+	} else if proot.Stderr, err = writeToOs(proot.Stderr); err != nil {
+		return err
+	} else if proot.Stdin, err = readToOs(proot.Stdin); err != nil {
+		return err
+	}
+
+	proot.vpids = 1
+	return proot.start()
 }
 
-func writeToOs(input io.Writer) (*os.File, error) {
-	if input == nil {
-		return nil, fs.ErrNotExist
-	} else if v, ok := input.(*os.File); ok {
-		return v, nil
+func (proot PRoot) WaitError() error {
+	if proot.done == nil {
+		return proot.Cmd.Wait()
 	}
-	r, w, err := os.Pipe()
-	if err != nil {
-		return nil, err
-	}
-	go io.Copy(input, r)
-	return w, nil
+	return <-proot.done
 }

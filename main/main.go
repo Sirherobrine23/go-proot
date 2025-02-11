@@ -1,40 +1,38 @@
 package main
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 
 	"sirherobrine23.com.br/go-bds/go-proot"
 	"sirherobrine23.com.br/go-bds/go-proot/filesystem"
 )
 
 func main() {
-	tmprdir := os.TempDir()
 	caller := &proot.PRoot{
 		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
 
 		Rootfs: filesystem.HostBind{
-			Path:   filepath.Join(tmprdir, "rootfs"),
+			Path:   "/",
 			IsFile: false,
 		},
 
 		// Command test
-		Command: []string{"env"},
+		Command: os.Args[1:],
 	}
 
 	if err := caller.Start(); err != nil {
-		println(err.Error())
+		fmt.Fprintln(os.Stderr, "start:", err.Error())
 		os.Exit(-1)
 		return
 	}
 
-	status, err := caller.Process.Wait()
+	err := caller.WaitError()
 	if err != nil {
-		println(err.Error())
-		os.Exit(-1)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err.Error())
+		os.Exit(1)
 		return
 	}
-	os.Exit(status.ExitCode())
 }

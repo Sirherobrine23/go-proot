@@ -31,5 +31,5 @@ func TestInit(t *testing.T) {
 		return
 	}
 
-	caller.Process.Wait()
+	caller.Cmd.Process.Wait()
 }

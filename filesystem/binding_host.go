@@ -54,52 +54,59 @@ var (
 	}
 )
 
-func (HostBind) ReadOnly() bool { return true }
+func (HostBind) ReadOnly() bool { return false }
+
+func (local HostBind) HostPath(name string) string {
+	if local.Path[len(local.Path)-1] == '/' || !local.IsFile {
+		return filepath.Join(local.Path, filepath.Clean(name))
+	}
+	return local.Path
+}
 
 func (local HostBind) OpenFile(name string, flags int, perm fs.FileMode) (File, error) {
-	if local.Path[len(local.Path)] == '/' || !local.IsFile {
+	if local.Path[len(local.Path)-1] == '/' || !local.IsFile {
 		return os.OpenFile(filepath.Join(local.Path, filepath.Clean(name)), flags, perm)
 	}
 	return os.OpenFile(local.Path, flags, perm)
 }
 
 func (local HostBind) Mkdir(name string, perm fs.FileMode) error {
-	if local.Path[len(local.Path)] == '/' || !local.IsFile {
+	if local.Path[len(local.Path)-1] == '/' || !local.IsFile {
 		return os.Mkdir(filepath.Join(local.Path, filepath.Clean(name)), perm)
 	}
 	return fs.ErrPermission
 }
 
 func (local HostBind) Symlink(oldname string, newname string) error {
-	if local.Path[len(local.Path)] == '/' || !local.IsFile {
+	if local.Path[len(local.Path)-1] == '/' || !local.IsFile {
 		return os.Symlink(filepath.Join(local.Path, filepath.Clean(oldname)), filepath.Join(local.Path, filepath.Clean(newname)))
 	}
 	return fs.ErrPermission
 }
 
 func (local HostBind) ReadDir(name string) ([]fs.DirEntry, error) {
-	if local.Path[len(local.Path)] == '/' || !local.IsFile {
+	if local.Path[len(local.Path)-1] == '/' || !local.IsFile {
 		return os.ReadDir(filepath.Join(local.Path, filepath.Clean(name)))
 	}
 	return nil, fs.ErrPermission
 }
 
 func (local HostBind) Stat(name string) (stat fs.FileInfo, err error) {
-	if local.Path[len(local.Path)] == '/' || !local.IsFile {
+	if local.Path[len(local.Path)-1] == '/' || !local.IsFile {
 		return os.Stat(filepath.Join(local.Path, filepath.Clean(name)))
 	}
 	return os.Stat(local.Path)
 }
 
 func (local HostBind) Chmod(name string, perm fs.FileMode) error {
-	if local.Path[len(local.Path)] == '/' || !local.IsFile {
+	if local.Path[len(local.Path)-1] == '/' || !local.IsFile {
 		return os.Chmod(filepath.Join(local.Path, filepath.Clean(name)), perm)
 	}
 	return os.Chmod(local.Path, perm)
 }
 
 func (local HostBind) Chown(name string, uid, gid int) error {
-	if local.Path[len(local.Path)] == '/' || !local.IsFile {
+	if local.Path[len(local.Path)-1] == '/' || !local.IsFile {
 		return os.Chown(filepath.Join(local.Path, filepath.Clean(name)), uid, gid)
 	}
 	return os.Chown(local.Path, uid, gid)
