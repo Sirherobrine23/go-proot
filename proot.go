@@ -1,14 +1,31 @@
 package proot
 
 import (
+	"errors"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 
 	"sirherobrine23.com.br/go-bds/go-proot/filesystem"
 )
+
+type ProcessPID struct {
+	PID     int         // PID of the process
+	Process *os.Process // Process waiting
+	Err     error       // If the process has an error
+
+	Childs map[int]*ProcessPID // Childs of the process
+}
+
+func (proc *ProcessPID) Kill() error {
+	for _, child := range proc.Childs {
+		child.Kill()
+	}
+	return proc.Process.Kill()
+}
 
 // chroot, mount --bind, and binfmt_misc without privilege/setup for Linux/Android directly from golang
 type PRoot struct {
@@ -118,8 +135,14 @@ type PRoot struct {
 	// Add exec cmd to process proot
 	Cmd *exec.Cmd
 
-	done   <-chan error
-	newPID int
+	// Root process pid
+	Pid *ProcessPID
+
+	// erros
+	pidsErros map[int]*ProcessPID
+
+	// Wait group
+	wait sync.WaitGroup
 
 	vpids int
 }
@@ -202,12 +225,20 @@ func (proot *PRoot) Start() error {
 	}
 
 	proot.vpids = 1
+	proot.pidsErros = map[int]*ProcessPID{}
 	return proot.start()
 }
 
-func (proot PRoot) WaitError() error {
-	if proot.done == nil {
-		return proot.Cmd.Wait()
+func (proot *PRoot) Wait() error {
+	proot.wait.Wait()
+	if len(proot.pidsErros) > 0 {
+		var errs []error
+		for _, pid := range proot.pidsErros {
+			if pid.Err != nil {
+				errs = append(errs, pid.Err)
+			}
+		}
+		return errors.Join(errs...)
 	}
-	return <-proot.done
+	return nil
 }

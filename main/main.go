@@ -29,7 +29,7 @@ func main() {
 		return
 	}
 
-	err := caller.WaitError()
+	err := caller.Wait()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err.Error())
 		os.Exit(1)
