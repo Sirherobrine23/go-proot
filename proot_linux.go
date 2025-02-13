@@ -24,32 +24,6 @@ const DefaultPtraceFlags = syscall.PTRACE_O_MASK |
 // var logFile = os.Stdeerr
 var logFile, _ = os.Create("./proot.log")
 
-func WriteString(pid int, addr uintptr, newStr string) error {
-	b := append([]byte(newStr), 0) // Null-terminate
-	_, err := syscall.PtracePokeData(pid, addr, b)
-	return err
-}
-
-func ReadString(pid int, addr uintptr) (string, error) {
-	var data []byte
-	var buf [8]byte // 8 bytes at a time
-	for {
-		_, err := syscall.PtracePeekData(pid, addr, buf[:])
-		if err != nil {
-			return "", fmt.Errorf("PtracePeekData failed at %x: %v", addr, err)
-		}
-
-		for _, b := range buf {
-			if b == 0 {
-				return string(data), nil
-			}
-			data = append(data, b)
-		}
-
-		addr += uintptr(len(buf))
-	}
-}
-
 /*
 Start process in backgroud with support to pass os.Stdout, os.Stderr and os.Stdin to process to manipulate TTY
 */
@@ -91,128 +65,61 @@ func (proot *PRoot) start() error {
 		return err
 	}
 
-	proot.Pid = &ProcessPID{
-		PID:     proot.Cmd.Process.Pid,
-		Process: proot.Cmd.Process,
-		Childs:  map[int]*ProcessPID{},
+	proot.Pid = &Tracee{
+		PID:    proot.Cmd.Process.Pid,
+		VPID:   proot.vpids,
+		Childs: map[int]*Tracee{},
 	}
-	waitStart := make(chan struct{})
-	go proot.watcherPID(waitStart, proot.Pid, proot.Cmd.Process.Pid)
-	<-waitStart
-	close(waitStart)
+
+	started := make(chan struct{}, 1)
+	go proot.eventLoop(started)
+	<-started
+	close(started)
 	return err
 }
 
 // Watch process and childs to new syscallers and process health
-func (proot *PRoot) watcherPID(ccaller chan<- struct{}, proc *ProcessPID, pid int) {
+func (proot *PRoot) eventLoop(ccaller chan<- struct{}) {
 	proot.wait.Add(1) // Add wait group
-	defer delete(proc.Childs, pid)
-	defer proot.wait.Done()
-	defer proc.Kill()
-	if ccaller != nil {
-		ccaller <- struct{}{}
-	}
+	ccaller <- struct{}{}
+	defer proot.Pid.Kill() // Kill process and childs
+	defer proot.wait.Done() // Done event loop
+
 	for {
-		err := error(nil)
-		fmt.Fprintf(logFile, "Waiting new pid\n")
-
-		var status syscall.WaitStatus
-		if pid, err = syscall.Wait4(pid, &status, 0, nil); err != nil {
-			fmt.Fprintf(logFile, "Error waiting for process: %v\n", err)
-			proot.pidsErros[pid] = &ProcessPID{
-				PID:    pid,
-				Err:    err,
-				Childs: proc.Childs,
+		var traceeStatus syscall.WaitStatus
+		pid, err := syscall.Wait4(proot.Pid.PID, &traceeStatus, syscall.WALL, nil)
+		if err != nil {
+			if err == syscall.EINTR {
+				continue
 			}
+			proot.Pid.Err = err
+			proot.Pid.Terminated = true
+			proot.Pid.Running = false
+			proot.Pid.Kill() // Kill process and childs
 			return
 		}
-		fmt.Fprintf(logFile, "\n")
-		fmt.Fprintf(logFile, "CoreDump: %v, Signal: %v, Exit: %v, Stoped: %v, Trap: %v\n",
-			status.CoreDump(),
-			status.Signal().String(),
-			status.ExitStatus(),
-			status.Stopped(),
-			status.TrapCause(),
-		)
-		keep_stopped := true
+		tracee := proot.Pid.getTracee(proot, pid, true)
+		if tracee == nil {
+			panic("Tracee not found")
+		}
+		tracee.Running = false
+		fmt.Fprintf(logFile, "PID: %d, VPID: %d, Status: %x\n", tracee.PID, tracee.VPID, traceeStatus)
 
-		if status.Stopped() {
-			switch traped := (uint32(status) & 0xfff00) >> 8; traped {
-			case uint32(syscall.SIGTRAP) | 0x80:
-				// if ((ptracee->as_ptracee).ignore_syscalls || (ptracee->as_ptracee).ignore_loader_syscalls) return false;
-				// if (((ptracee->as_ptracee).options & PTRACE_O_TRACESYSGOOD) == 0) event &= ~(0x80 << 8);
-				// handledFirst = IS_IN_SYSEXIT(ptracee);
-				fmt.Fprintf(logFile, "SIGTRAP %d\n", traped)
-			case uint32(syscall.SIGTRAP) | syscall.PTRACE_EVENT_FORK<<8:
-				fmt.Fprintf(logFile, "PTRACE_EVENT_FORK %d\n", traped)
-			case uint32(syscall.SIGTRAP) | syscall.PTRACE_EVENT_VFORK<<8:
-				fmt.Fprintf(logFile, "PTRACE_EVENT_VFORK %d\n", traped)
-			case uint32(syscall.SIGTRAP) | syscall.PTRACE_EVENT_VFORK_DONE<<8:
-				fmt.Fprintf(logFile, "PTRACE_EVENT_VFORK_DONE %d\n", traped)
-			case uint32(syscall.SIGTRAP) | syscall.PTRACE_EVENT_CLONE<<8:
-				fmt.Fprintf(logFile, "PTRACE_EVENT_CLONE %d\n", traped)
-			case uint32(syscall.SIGTRAP) | syscall.PTRACE_EVENT_EXEC<<8:
-				fmt.Fprintf(logFile, "PTRACE_EVENT_EXEC %d\n", traped)
-			// case uint32(syscall.SIGTRAP):
-				// syscall.PtraceSetOptions(pid, DefaultPtraceFlags)
-			default:
-				fmt.Fprintf(logFile, "PTRACE_EVENT_UNKNOWN %d\n", traped)
+		if tracee.AsPtracee.Ptracer != nil {
+			keepStopped, err := tracee.HandlePtraceeEvent(int(traceeStatus))
+			if err != nil {
+				panic(err)
+			} else if keepStopped {
+				continue
 			}
-		} else if status.Exited() || status.Signaled() {
-			fmt.Fprintf(logFile, "Process %d exited with status %d\n", pid, status.ExitStatus())
-			proc.Kill()
-			return
 		}
 
-		if keep_stopped {
-			// Continue execution
-			if err := syscall.PtraceCont(pid, 0); err != nil {
-				fmt.Fprintf(logFile, "Error continuing process: %v\n", err)
-				proot.pidsErros[pid] = &ProcessPID{
-					PID:    pid,
-					Err:    err,
-					Childs: proc.Childs,
-				}
-				return
-			}
-			continue
+		signal, err := tracee.HandleTraceeEvent(int(traceeStatus))
+		if err == nil {
+			_ = tracee.RestartTracee(signal)
 		}
-
-		var Regs syscall.PtraceRegs
-		if err := syscall.PtraceGetRegs(pid, &Regs); err != nil {
-			fmt.Fprintf(logFile, "Error getting registers: %v\n", err)
-			proot.pidsErros[pid] = &ProcessPID{
-				PID:    pid,
-				Err:    err,
-				Childs: proc.Childs,
-			}
-			return
-		}
-
-		fmt.Fprintf(logFile, "Registers: %+v\n", Regs)
-		if err := proot.handlerSyscall(pid, status, &Regs); err != nil {
-			fmt.Fprintf(logFile, "Error processing syscall: %v\n", err)
-			proot.pidsErros[pid] = &ProcessPID{
-				PID:    pid,
-				Err:    err,
-				Childs: proc.Childs,
-			}
-			return
-		}
-
-		if status.Stopped() {
-			// Continue execution
-			if err := syscall.PtraceCont(pid, 0); err != nil {
-				fmt.Fprintf(logFile, "Error continuing process: %v\n", err)
-				proot.pidsErros[pid] = &ProcessPID{
-					PID:    pid,
-					Err:    err,
-					Childs: proc.Childs,
-				}
-				return
-			}
-		} else {
-			syscall.PtraceSyscall(pid, 0)
+		if err != nil {
+			panic(err)
 		}
 	}
 }

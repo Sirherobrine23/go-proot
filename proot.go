@@ -12,21 +12,6 @@ import (
 	"sirherobrine23.com.br/go-bds/go-proot/filesystem"
 )
 
-type ProcessPID struct {
-	PID     int         // PID of the process
-	Process *os.Process // Process waiting
-	Err     error       // If the process has an error
-
-	Childs map[int]*ProcessPID // Childs of the process
-}
-
-func (proc *ProcessPID) Kill() error {
-	for _, child := range proc.Childs {
-		child.Kill()
-	}
-	return proc.Process.Kill()
-}
-
 // chroot, mount --bind, and binfmt_misc without privilege/setup for Linux/Android directly from golang
 type PRoot struct {
 	// The specified path typically contains a Linux distribution where
@@ -136,10 +121,10 @@ type PRoot struct {
 	Cmd *exec.Cmd
 
 	// Root process pid
-	Pid *ProcessPID
+	Pid *Tracee
 
 	// erros
-	pidsErros map[int]*ProcessPID
+	pidsErros map[int]*Tracee
 
 	// Wait group
 	wait sync.WaitGroup
@@ -225,7 +210,7 @@ func (proot *PRoot) Start() error {
 	}
 
 	proot.vpids = 1
-	proot.pidsErros = map[int]*ProcessPID{}
+	proot.pidsErros = map[int]*Tracee{}
 	return proot.start()
 }
 
