@@ -1,31 +1,33 @@
+//go:build linux || android
+
+// Go-Proot is proot implemententio in golang
+//
+// Original tool: https://github.com/proot-me/proot
 package proot
 
 import (
-	"errors"
+	"encoding/json"
+	"fmt"
 	"io"
-	"io/fs"
-	"os"
 	"os/exec"
-	"sync"
-	"syscall"
 
-	"sirherobrine23.com.br/go-bds/go-proot/filesystem"
+	"golang.org/x/sys/unix"
 )
 
 // chroot, mount --bind, and binfmt_misc without privilege/setup for Linux/Android directly from golang
-type PRoot struct {
+type Proot struct {
 	// The specified path typically contains a Linux distribution where
 	// all new programs will be confined.  The default rootfs is /
 	// when none is specified, this makes sense when the bind mechanism
 	// is used to relocate host files and directories.
-	Rootfs filesystem.HostBind
+	Rootfs string
 
 	// This option makes any file or directory of the host rootfs
 	// accessible in the confined environment just as if it were part of
 	// the guest rootfs.
 	//
-	// "mount path" => Virtual/Host filesystem
-	Binds map[string]filesystem.Binding
+	// "Fake path" => "Host path"
+	Binds map[string]string
 
 	// Execute guest programs through QEMU as specified by command.
 	//
@@ -35,7 +37,7 @@ type PRoot struct {
 	// emulated by QEMU user-mode.  The native execution of host programs
 	// is still effective and the whole host rootfs is bound to
 	// /host-rootfs in the guest environment.
-	Qemu []Binfmt
+	Qemu string
 
 	// Make current kernel appear as kernel release.
 	//
@@ -44,7 +46,7 @@ type PRoot struct {
 	// old".  To be able to run such programs, PRoot can emulate some of
 	// the features that are available in the kernel release specified by
 	// *string* but that are missing in the current kernel.
-	KernelRelease *syscall.Utsname
+	KernelRelease *unix.Utsname
 
 	// Make current user and group.
 	//
@@ -120,110 +122,100 @@ type PRoot struct {
 	// Add exec cmd to process proot
 	Cmd *exec.Cmd
 
-	// Root process pid
-	Pid *Tracee
-
-	// erros
-	pidsErros map[int]*Tracee
-
-	// Wait group
-	wait sync.WaitGroup
-
-	vpids int
+	Err error
 }
 
-func closePipes(Stdout, Stderr, Stdin io.Closer) {
-	if Stdout != nil {
-		_ = Stdout.Close()
-	}
-	if Stderr != nil {
-		_ = Stderr.Close()
-	}
-	if Stdin != nil {
-		_ = Stdin.Close()
-	}
-}
+func (proot *Proot) Start() error {
 
-// Create new *os.File and add to Stdout, Stderr and Stdin
-func (proot *PRoot) AttachPipe() (Stdout, Stderr io.ReadCloser, Stdin io.WriteCloser, err error) {
-	if Stdout, proot.Stdout, err = os.Pipe(); err != nil {
-		closePipes(Stdout, Stderr, Stdin)
-		return nil, nil, nil, err
-	} else if Stderr, proot.Stderr, err = os.Pipe(); err != nil {
-		closePipes(Stdout, Stderr, Stdin)
-		return nil, nil, nil, err
-	} else if proot.Stdin, Stdin, err = os.Pipe(); err != nil {
-		closePipes(Stdout, Stderr, Stdin)
-		return nil, nil, nil, err
-	}
-	return
-}
-
-// Start process and watch syscall
-func (proot *PRoot) Start() error {
-	if proot.Cmd != nil {
-		return nil
-	}
-
-	if len(proot.Qemu) > 0 {
-		if len(proot.Binds) == 0 {
-			proot.Binds = map[string]filesystem.Binding{}
-		}
-		proot.Binds["/host-rootfs"] = &filesystem.HostBind{Path: "/", IsFile: false}
-	}
-
-	readToOs := func(input io.Reader) (*os.File, error) {
-		if input == nil {
-			return nil, fs.ErrNotExist
-		} else if v, ok := input.(*os.File); ok {
-			return v, nil
-		}
-		r, w, err := os.Pipe()
-		if err != nil {
-			return nil, err
-		}
-		go io.Copy(w, input)
-		return r, nil
-	}
-
-	writeToOs := func(input io.Writer) (*os.File, error) {
-		if input == nil {
-			return nil, fs.ErrNotExist
-		} else if v, ok := input.(*os.File); ok {
-			return v, nil
-		}
-		r, w, err := os.Pipe()
-		if err != nil {
-			return nil, err
-		}
-		go io.Copy(input, r)
-		return w, nil
-	}
-
-	err := error(nil)
-	if proot.Stdout, err = writeToOs(proot.Stdout); err != nil {
-		return err
-	} else if proot.Stderr, err = writeToOs(proot.Stderr); err != nil {
-		return err
-	} else if proot.Stdin, err = readToOs(proot.Stdin); err != nil {
-		return err
-	}
-
-	proot.vpids = 1
-	proot.pidsErros = map[int]*Tracee{}
-	return proot.start()
-}
-
-func (proot *PRoot) Wait() error {
-	proot.wait.Wait()
-	if len(proot.pidsErros) > 0 {
-		var errs []error
-		for _, pid := range proot.pidsErros {
-			if pid.Err != nil {
-				errs = append(errs, pid.Err)
-			}
-		}
-		return errors.Join(errs...)
-	}
+	defer proot.loopEvent()
 	return nil
 }
+
+func (proot *Proot) Run() ([]byte, error) {
+
+	return nil, nil
+}
+
+func (proot *Proot) loopEvent() {
+	for {
+		var traceeStatus unix.WaitStatus
+		pid, err := unix.Wait4(proot.Cmd.Process.Pid, &traceeStatus, unix.WALL, nil)
+		if err != nil {
+			proot.Err = err
+			return
+		}
+
+
+
+		// Get process trace
+		trace, err := proot.getTrace(pid)
+		if err != nil {
+			proot.Err = err
+			return
+		}
+
+		d, _ := json.MarshalIndent(trace, "", " ")
+		println(string(d))
+	}
+}
+
+func (proot *Proot) handleTraceeEventKernel(pid int, traceeStatus unix.WaitStatus) int {
+	var status int
+	if traceeStatus.Exited() || traceeStatus.Signaled() {
+		switch {
+		case traceeStatus.Exited():
+			fmt.Printf("%d: exit code: %d\n", pid, traceeStatus.ExitStatus())
+		case traceeStatus.Signaled():
+			fmt.Printf("%d: Signal: %s\n", pid, traceeStatus.Signal())
+		}
+		return 0
+	} else if traceeStatus.Stopped() {
+		switch traceeStatus.StopSignal() {
+		case unix.SIGTRAP:
+			defaultPtraceOptions := unix.PTRACE_O_TRACESYSGOOD |
+				unix.PTRACE_O_TRACEFORK |
+				unix.PTRACE_O_TRACEVFORK |
+				unix.PTRACE_O_TRACEVFORKDONE |
+				unix.PTRACE_O_TRACEEXEC |
+				unix.PTRACE_O_TRACECLONE |
+				unix.PTRACE_O_TRACEEXIT
+
+			if err := unix.PtraceSetOptions(pid, defaultPtraceOptions); err != nil {
+				proot.Err = err
+				return 0
+			}
+		case unix.SIGTRAP | 0x80:
+			// if (tracee->exe == NULL) {
+			// 	tracee->restart_how = PTRACE_CONT; /* SYSCALL OR CONT */
+			// 	return 0;
+			// }
+
+			// translate_syscall(tracee);
+		case unix.SIGTRAP | unix.PTRACE_EVENT_VFORK<<8:
+			// (void)new_child(tracee, unix.CLONE_VFORK)
+		case unix.SIGTRAP | unix.PTRACE_EVENT_FORK<<8, unix.SIGTRAP | unix.PTRACE_EVENT_CLONE<<8:
+			// (void)new_child(tracee, 0)
+		case unix.SIGTRAP | unix.PTRACE_EVENT_VFORK_DONE<<8, unix.SIGTRAP | unix.PTRACE_EVENT_EXEC<<8, unix.SIGTRAP | unix.PTRACE_EVENT_EXIT<<8:
+			// signal = 0
+			// break
+		case unix.SIGSTOP:
+			// Stop this tracee until PRoot has received the EVENT_*FORK|CLONE notification.
+			// if (tracee->exe == NULL) {
+			// 	tracee->sigstop = SIGSTOP_PENDING;
+			// 	signal = -1;
+			// }
+
+			// For each tracee, the first SIGSTOP is only used to notify the tracer.
+			// if (tracee->sigstop == SIGSTOP_IGNORED) {
+			// 	tracee->sigstop = SIGSTOP_ALLOWED;
+			// 	signal = 0;
+			// }
+			// break;
+		}
+	}
+
+	return status
+}
+
+// new_child()
+// https://sirherobrine23.com.br/proot-me/proot/src/commit/5f780cba57ce7ce557a389e1572e0d30026fcbca/src/tracee/tracee.c#L381-L587
