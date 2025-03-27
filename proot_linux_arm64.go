@@ -1,4 +1,5 @@
-//go:build linux && arm64
+//go:build (linux || android) && arm64
+
 package proot
 
 import "golang.org/x/sys/unix"

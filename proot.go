@@ -1,13 +1,9 @@
-//go:build linux || android
-
 // Go-Proot is proot implemententio in golang
 //
 // Original tool: https://github.com/proot-me/proot
 package proot
 
 import (
-	"encoding/json"
-	"fmt"
 	"io"
 	"os/exec"
 
@@ -126,8 +122,8 @@ type Proot struct {
 }
 
 func (proot *Proot) Start() error {
+	go proot.loopEvent()
 
-	defer proot.loopEvent()
 	return nil
 }
 
@@ -135,87 +131,3 @@ func (proot *Proot) Run() ([]byte, error) {
 
 	return nil, nil
 }
-
-func (proot *Proot) loopEvent() {
-	for {
-		var traceeStatus unix.WaitStatus
-		pid, err := unix.Wait4(proot.Cmd.Process.Pid, &traceeStatus, unix.WALL, nil)
-		if err != nil {
-			proot.Err = err
-			return
-		}
-
-
-
-		// Get process trace
-		trace, err := proot.getTrace(pid)
-		if err != nil {
-			proot.Err = err
-			return
-		}
-
-		d, _ := json.MarshalIndent(trace, "", " ")
-		println(string(d))
-	}
-}
-
-func (proot *Proot) handleTraceeEventKernel(pid int, traceeStatus unix.WaitStatus) int {
-	var status int
-	if traceeStatus.Exited() || traceeStatus.Signaled() {
-		switch {
-		case traceeStatus.Exited():
-			fmt.Printf("%d: exit code: %d\n", pid, traceeStatus.ExitStatus())
-		case traceeStatus.Signaled():
-			fmt.Printf("%d: Signal: %s\n", pid, traceeStatus.Signal())
-		}
-		return 0
-	} else if traceeStatus.Stopped() {
-		switch traceeStatus.StopSignal() {
-		case unix.SIGTRAP:
-			defaultPtraceOptions := unix.PTRACE_O_TRACESYSGOOD |
-				unix.PTRACE_O_TRACEFORK |
-				unix.PTRACE_O_TRACEVFORK |
-				unix.PTRACE_O_TRACEVFORKDONE |
-				unix.PTRACE_O_TRACEEXEC |
-				unix.PTRACE_O_TRACECLONE |
-				unix.PTRACE_O_TRACEEXIT
-
-			if err := unix.PtraceSetOptions(pid, defaultPtraceOptions); err != nil {
-				proot.Err = err
-				return 0
-			}
-		case unix.SIGTRAP | 0x80:
-			// if (tracee->exe == NULL) {
-			// 	tracee->restart_how = PTRACE_CONT; /* SYSCALL OR CONT */
-			// 	return 0;
-			// }
-
-			// translate_syscall(tracee);
-		case unix.SIGTRAP | unix.PTRACE_EVENT_VFORK<<8:
-			// (void)new_child(tracee, unix.CLONE_VFORK)
-		case unix.SIGTRAP | unix.PTRACE_EVENT_FORK<<8, unix.SIGTRAP | unix.PTRACE_EVENT_CLONE<<8:
-			// (void)new_child(tracee, 0)
-		case unix.SIGTRAP | unix.PTRACE_EVENT_VFORK_DONE<<8, unix.SIGTRAP | unix.PTRACE_EVENT_EXEC<<8, unix.SIGTRAP | unix.PTRACE_EVENT_EXIT<<8:
-			// signal = 0
-			// break
-		case unix.SIGSTOP:
-			// Stop this tracee until PRoot has received the EVENT_*FORK|CLONE notification.
-			// if (tracee->exe == NULL) {
-			// 	tracee->sigstop = SIGSTOP_PENDING;
-			// 	signal = -1;
-			// }
-
-			// For each tracee, the first SIGSTOP is only used to notify the tracer.
-			// if (tracee->sigstop == SIGSTOP_IGNORED) {
-			// 	tracee->sigstop = SIGSTOP_ALLOWED;
-			// 	signal = 0;
-			// }
-			// break;
-		}
-	}
-
-	return status
-}
-
-// new_child()
-// https://sirherobrine23.com.br/proot-me/proot/src/commit/5f780cba57ce7ce557a389e1572e0d30026fcbca/src/tracee/tracee.c#L381-L587

@@ -1,4 +1,5 @@
 //go:build linux && loong64
+
 package proot
 
 import "golang.org/x/sys/unix"

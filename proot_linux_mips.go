@@ -1,4 +1,5 @@
 //go:build linux && mips
+
 package proot
 
 import "golang.org/x/sys/unix"
